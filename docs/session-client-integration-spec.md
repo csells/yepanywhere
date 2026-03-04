@@ -1001,7 +1001,31 @@ HTTP-over-WebSocket multiplexer:
 
 ## 11. Files to Copy {#11-files-to-copy}
 
-### 11.1 Essential Client Files
+### 11.0 Recommended Approach: Copy the Whole Tree
+
+The session chat UI has deep transitive dependencies — hooks import libs, libs import shared utilities, components import hooks and contexts, tool renderers import shared components. Rather than cherry-picking files (and inevitably missing one), **copy the entire client and shared source trees**, then delete what you don't need:
+
+```bash
+# Copy both packages
+cp -r packages/client/src/ your-app/src/ya-client/
+cp -r packages/shared/src/ your-app/src/ya-shared/
+
+# Delete pages you won't use
+rm your-app/src/ya-client/pages/SettingsPage.tsx
+rm your-app/src/ya-client/pages/InboxPage.tsx
+rm your-app/src/ya-client/pages/AgentsPage.tsx
+rm your-app/src/ya-client/App.tsx
+rm your-app/src/ya-client/RemoteApp.tsx
+
+# Fix import paths for @yep-anywhere/shared → your local copy
+# (or keep it as a workspace package)
+```
+
+This is the only approach that guarantees zero missing-import build failures. TypeScript will tell you if you delete something that's still needed.
+
+The file listings below serve as a **conceptual guide** — they explain what each file does and why it matters, so you understand the architecture even if you're copying the whole tree.
+
+### 11.1 Essential Client Files (Conceptual Guide)
 
 ```
 packages/client/src/
@@ -1125,9 +1149,9 @@ packages/client/src/
     └── tool-rows.css                      # Tool-specific styles
 ```
 
-> **⚠️ Transitive dependencies:** Files marked with ⚠️ are not obvious from the high-level component list but are required by imported components or hooks. Copying only the listed files without their transitive imports will cause build failures. The safest approach is to copy the entire `packages/client/src/` tree and delete unused pages (e.g., `pages/SettingsPage.tsx`, `pages/InboxPage.tsx`).
+> **⚠️ Transitive dependencies:** Files marked with ⚠️ are not obvious from the high-level component list but are required by imported components or hooks. This list is comprehensive but may not capture every transitive import as the codebase evolves. **Use the "Copy the Whole Tree" approach from §11.0** to avoid missing-import build failures.
 
-### 11.2 Shared Package Files
+### 11.2 Shared Package Files (Conceptual Guide)
 
 ```
 packages/shared/src/
