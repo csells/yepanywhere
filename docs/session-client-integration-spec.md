@@ -1003,178 +1003,249 @@ HTTP-over-WebSocket multiplexer:
 
 ### 11.0 Integration Strategy
 
-The session chat UI has deep transitive dependencies — hooks import libs, libs import shared utilities, components import contexts, tool renderers import shared components. The file listings below are comprehensive but the codebase evolves, so **use TypeScript as your safety net:**
+The session chat files fall into two categories:
 
-1. Copy the files listed in §11.1 and §11.2 into your project
-2. Run `tsc --noEmit`
-3. If TypeScript reports missing imports, copy those files too
-4. Repeat until clean
+1. **Copy wholesale** (§11.1) — Files that are 100% session chat UI. These exist solely to render and interact with an agent conversation. Copy them directly into your project.
 
-This iterative approach gets you a minimal, surgical copy without dragging in the entire YA client (which includes pages, routing, settings, inbox, and other features unrelated to the session chat).
+2. **Extract what you need** (§11.2) — Files that are general YA infrastructure (API client, connection layer, type definitions, toast/modal primitives). Your app likely has its own versions of these. Don't copy them — extract the specific functions, types, and endpoints the session chat needs and wire them into your own infrastructure.
 
-### 11.1 Essential Client Files
+After copying §11.1 files and stubbing/adapting §11.2 dependencies, run `tsc --noEmit` to catch anything missed.
 
-```
-packages/client/src/
-├── api/
-│   ├── client.ts                          # API client (all endpoints)
-│   └── upload.ts                          # Chunked file upload implementation
-├── components/
-│   ├── MessageList.tsx                    # Scrollable message container
-│   ├── MessageInput.tsx                   # Prompt textarea
-│   ├── MessageInputToolbar.tsx            # Input toolbar (modes, send)
-│   ├── RenderItemComponent.tsx            # Dispatch to block components
-│   ├── ProcessingIndicator.tsx            # ⚠️ Required by MessageList
-│   ├── SessionListItem.tsx                # Session list item
-│   ├── ToolApprovalPanel.tsx              # Tool approval UI
-│   ├── QuestionAnswerPanel.tsx            # Agent question UI
-│   ├── ProviderBadge.tsx                  # Provider icon/label
-│   ├── StatusBadge.tsx                    # ⚠️ Required by SessionListItem
-│   ├── ContextUsageIndicator.tsx          # ⚠️ Required by SessionListItem
-│   ├── ThinkingIndicator.tsx              # ⚠️ Required by ProcessingIndicator, StatusBadge
-│   ├── RecentSessionsDropdown.tsx         # Session switcher dropdown
-│   ├── VoiceInputButton.tsx               # Voice input
-│   ├── SchemaWarning.tsx                  # ⚠️ Required by 14/17 tool renderers
-│   ├── ModeSelector.tsx                   # ⚠️ Required by MessageInputToolbar
-│   ├── SlashCommandButton.tsx             # ⚠️ Required by MessageInputToolbar
-│   ├── Toast.tsx                          # ⚠️ Required by ToastContext (ToastContainer)
-│   ├── ConnectionBar.tsx                  # Connection status indicator
-│   ├── FilePathLink.tsx                   # Clickable file path (optional, used by FilePage)
-│   └── ui/
-│       └── Modal.tsx                      # ⚠️ Required by UserPromptBlock, EditRenderer
-│   ├── tools/
-│   │   └── summaries.ts                   # ⚠️ Required by ToolCallRow, ToolApprovalPanel
-│   ├── blocks/
-│   │   ├── TextBlock.tsx                  # Text/markdown rendering
-│   │   ├── ToolCallRow.tsx                # Tool use/result display
-│   │   ├── UserPromptBlock.tsx            # User message bubble
-│   │   ├── ThinkingBlock.tsx              # Extended thinking
-│   │   └── SessionSetupBlock.tsx          # Collapsed setup
-│   └── renderers/
-│       ├── ContentBlockRenderer.tsx       # ⚠️ Required by TaskRenderer (subagent rendering)
-│       ├── registry.ts                    # Content block renderer registry
-│       ├── types.ts                       # Renderer interfaces (incl. RenderContext)
-│       ├── index.ts                       # Registry initialization
-│       └── tools/
-│           ├── index.tsx                  # Tool renderer registry + all registrations
-│           ├── types.ts                   # Tool-specific types (EditInputWithAugment, etc.)
-│           ├── BashRenderer.tsx
-│           ├── EditRenderer.tsx
-│           ├── ReadRenderer.tsx
-│           ├── WriteRenderer.tsx
-│           ├── GlobRenderer.tsx
-│           ├── GrepRenderer.tsx
-│           ├── TodoWriteRenderer.tsx
-│           ├── TaskRenderer.tsx           # ⚠️ Requires AgentContentContext
-│           ├── WebSearchRenderer.tsx
-│           ├── WebFetchRenderer.tsx
-│           ├── AskUserQuestionRenderer.tsx
-│           ├── ExitPlanModeRenderer.tsx
-│           ├── UpdatePlanRenderer.tsx
-│           ├── WriteStdinRenderer.tsx
-│           ├── BashOutputRenderer.tsx
-│           ├── TaskOutputRenderer.tsx
-│           └── KillShellRenderer.tsx
-├── contexts/
-│   ├── StreamingMarkdownContext.tsx        # Streaming markdown event bus
-│   ├── AgentContentContext.tsx             # ⚠️ Required by TaskRenderer (will crash without it)
-│   ├── SchemaValidationContext.tsx         # ⚠️ Required by ALL tool renderers (validateToolResult)
-│   ├── SessionMetadataContext.tsx          # ⚠️ Required by TaskRenderer, EditRenderer
-│   └── ToastContext.tsx                    # ⚠️ Required by SchemaValidationContext
-├── hooks/
-│   ├── useSession.ts                      # Top-level session orchestrator
-│   ├── useSessionMessages.ts              # Message loading & merging
-│   ├── useSessionStream.ts                # WebSocket subscription
-│   ├── useSessionWatchStream.ts           # Non-owned session file watching
-│   ├── useStreamingContent.ts             # Stream delta accumulation
-│   ├── useStreamingMarkdown.ts            # DOM-based streaming rendering
-│   ├── useStreamingEnabled.ts             # ⚠️ Required by useStreamingContent
-│   ├── useGlobalSessions.ts               # Session list fetching
-│   ├── useFileActivity.ts                 # SSE event subscription
-│   ├── useRecentSessions.ts               # Recent sessions
-│   ├── useDraftPersistence.ts             # ⚠️ Required by MessageInput (draft localStorage)
-│   ├── useDrafts.ts                       # ⚠️ Required by ToolApprovalPanel, QuestionAnswerPanel
-│   ├── useFunPhrases.ts                   # ⚠️ Required by ProcessingIndicator
-│   ├── useRemoteImage.ts                  # ⚠️ Required by UserPromptBlock (image attachments)
-│   ├── useModelSettings.ts                # ⚠️ Required by ProviderBadge
-│   ├── useExpandedDiff.ts                 # ⚠️ Required by EditRenderer
-│   ├── useSchemaValidation.ts             # ⚠️ Required by SchemaValidationContext
-│   ├── useToast.ts                        # ⚠️ Required by ToastContext (Toast types)
-│   ├── useActivityBusState.ts             # ⚠️ Required by ConnectionBar
-│   └── useDeveloperMode.ts               # ⚠️ Required by ConnectionBar
-├── lib/
-│   ├── preprocessMessages.ts              # Message → RenderItem conversion
-│   ├── mergeMessages.ts                   # ⚠️ Required by useSession/useSessionMessages
-│   ├── pendingTasks.ts                    # ⚠️ Required by useSession (subagent detection)
-│   ├── sessionFile.ts                     # ⚠️ Required by useSession (file event parsing)
-│   ├── deviceDetection.ts                 # ⚠️ Required by MessageInput (coarse pointer check)
-│   ├── activityBus.ts                     # Global event hub
-│   ├── validateToolResult.ts              # ⚠️ Required by ALL tool renderers
-│   ├── classifyToolError.ts               # ⚠️ Required by TaskRenderer
-│   ├── storageKeys.ts                     # ⚠️ Required by useStreamingEnabled, useDraftPersistence
-│   ├── parseUserPrompt.ts                 # ⚠️ Required by UserPromptBlock
-│   ├── uuid.ts                            # ⚠️ Required by ToastContext (generateUUID)
-│   └── connection/
-│       ├── types.ts                       # Connection interface & error types
-│       ├── index.ts                       # Exports & lazy singletons
-│       ├── ConnectionManager.ts           # Reconnection state machine
-│       ├── RelayProtocol.ts               # HTTP-over-WS multiplexer
-│       ├── DirectConnection.ts            # ⚠️ REST-only connection (exported by index.ts)
-│       ├── WebSocketConnection.ts         # Local WebSocket connection
-│       ├── SecureConnection.ts            # Remote encrypted connection
-│       ├── srp-client.ts                  # SRP-6a authentication
-│       └── nacl-wrapper.ts                # NaCl encryption
-├── providers/
-│   └── registry.ts                        # ⚠️ Required by useSessionMessages (DAG ordering)
-├── constants.ts                           # ⚠️ Required by MessageInput (ENTER_SENDS_MESSAGE)
-├── types.ts                               # Client-side Message, Session, SessionStatus types
-├── types/
-│   └── renderItems.ts                     # RenderItem type definitions
-└── styles/
-    ├── index.css                          # Main styles
-    ├── renderers.css                      # Content block styles
-    └── tool-rows.css                      # Tool-specific styles
-```
+### 11.1 Copy Wholesale — Session Chat Files
 
-> **⚠️ Transitive dependencies:** Files marked with ⚠️ are not obvious from the high-level component list but are required by imported components or hooks. This list is comprehensive but may not capture every transitive import as the codebase evolves. If you hit missing imports, follow the `tsc --noEmit` iterative approach from §11.0.
+These files exist solely for the agent session chat. Copy them as-is (adjusting import paths).
 
-### 11.2 Shared Package Files
+**Components:**
 
-```
-packages/shared/src/
-├── types.ts                               # Core types (Provider, Session, etc.)
-├── app-types.ts                           # App message types & type guards
-├── dag.ts                                 # ⚠️ Required by mergeMessages.ts (DAG ordering)
-├── ideMetadata.ts                         # ⚠️ Required by parseUserPrompt.ts
-├── projectId.ts                           # ⚠️ Required by api/client.ts
-├── relay.ts                               # Relay protocol message types
-├── binary-framing.ts                      # Binary WebSocket frame encoding
-├── index.ts                               # Package exports barrel
-├── session/                               # Session utilities
-│   ├── index.ts                           # Barrel exports
-│   ├── SessionView.ts                     # getSessionDisplayTitle, etc.
-│   └── UnifiedSession.ts                  # Session abstraction
-└── claude-sdk-schema/
-    └── types.ts                           # SDK message & content block schemas
-```
+| File | Purpose |
+|------|---------|
+| `components/MessageList.tsx` | Scrollable message container with turn grouping, scroll management |
+| `components/MessageInput.tsx` | Prompt textarea with drafts, keyboard shortcuts, file attachments |
+| `components/MessageInputToolbar.tsx` | Toolbar: mode selector, thinking toggle, attach, send/stop |
+| `components/RenderItemComponent.tsx` | Dispatches RenderItem types to block components |
+| `components/ProcessingIndicator.tsx` | Animated "Thinking..." indicator with fun phrases |
+| `components/ToolApprovalPanel.tsx` | Tool approval UI: Yes/No/Accept Edits, keyboard shortcuts |
+| `components/QuestionAnswerPanel.tsx` | Agent question UI: tabs, options, text input |
+| `components/ProviderBadge.tsx` | Provider icon/label (Claude, Codex, Gemini) |
+| `components/StatusBadge.tsx` | Session status badges (External, Approval Needed, Thinking) |
+| `components/ContextUsageIndicator.tsx` | SVG pie chart for context window usage |
+| `components/ThinkingIndicator.tsx` | Pulsing dot indicator |
+| `components/SchemaWarning.tsx` | Schema validation warning badge (used by 14/17 tool renderers) |
+| `components/ModeSelector.tsx` | Permission mode selector (bottom sheet / dropdown) |
+| `components/SlashCommandButton.tsx` | Slash command dropdown menu |
+| `components/tools/summaries.ts` | Tool summary text for collapsed tool call view |
+| `components/blocks/TextBlock.tsx` | Text/markdown rendering with streaming |
+| `components/blocks/ToolCallRow.tsx` | Tool use/result display |
+| `components/blocks/UserPromptBlock.tsx` | User message bubble |
+| `components/blocks/ThinkingBlock.tsx` | Extended thinking display |
+| `components/blocks/SessionSetupBlock.tsx` | Collapsed session setup |
+| `components/renderers/ContentBlockRenderer.tsx` | Subagent content rendering |
+| `components/renderers/registry.ts` | Content block type dispatch registry |
+| `components/renderers/types.ts` | `ContentBlock`, `RenderContext`, `ContentRenderer` interfaces |
+| `components/renderers/index.ts` | Registry initialization |
+| `components/renderers/tools/index.tsx` | Tool renderer registry + all 17 registrations |
+| `components/renderers/tools/types.ts` | Tool-specific types (`EditInputWithAugment`, etc.) |
+| `components/renderers/tools/*.tsx` | All 17 tool renderers (Bash, Edit, Read, Write, Glob, Grep, TodoWrite, Task, WebSearch, WebFetch, AskUserQuestion, ExitPlanMode, UpdatePlan, WriteStdin, BashOutput, TaskOutput, KillShell) |
 
-### 11.3 Optional Files (for full feature parity)
+**Contexts:**
 
-```
-packages/client/src/
-├── components/
-│   ├── Sidebar.tsx                        # Navigation sidebar
-│   ├── InboxContent.tsx                   # Inbox tier rendering
-│   └── SessionMenu.tsx                    # Three-dot menu (rename, clone, etc.)
-├── contexts/
-│   └── InboxContext.tsx                   # Inbox state management
-├── pages/
-│   ├── SessionPage.tsx                    # Full session page (can serve as reference)
-│   ├── GlobalSessionsPage.tsx             # All sessions list page
-│   └── InboxPage.tsx                      # Inbox page
-└── lib/
-    └── hostStorage.ts                     # Multi-host connection storage
-```
+| File | Purpose |
+|------|---------|
+| `contexts/StreamingMarkdownContext.tsx` | Event bus connecting WebSocket streaming to active TextBlock |
+| `contexts/AgentContentContext.tsx` | Subagent content for Task renderer; lazy-loads via API |
+| `contexts/SchemaValidationContext.tsx` | Schema validation error reporting |
+| `contexts/SessionMetadataContext.tsx` | Provides `projectId`, `projectPath`, `sessionId` |
+
+**Hooks:**
+
+| File | Purpose |
+|------|---------|
+| `hooks/useSession.ts` | Top-level orchestrator composing all session hooks |
+| `hooks/useSessionMessages.ts` | Message loading/merging from REST with DAG ordering |
+| `hooks/useSessionStream.ts` | WebSocket subscription for live session |
+| `hooks/useSessionWatchStream.ts` | File change subscription for non-owned sessions |
+| `hooks/useStreamingContent.ts` | Stream delta accumulation with 50ms throttled batching |
+| `hooks/useStreamingMarkdown.ts` | DOM-based streaming rendering (bypasses React state) |
+| `hooks/useStreamingEnabled.ts` | localStorage toggle for streaming preference |
+| `hooks/useFileActivity.ts` | SSE event subscription |
+| `hooks/useDraftPersistence.ts` | Draft text persistence to localStorage |
+| `hooks/useDrafts.ts` | Draft tracking for approval feedback and question answers |
+| `hooks/useFunPhrases.ts` | Fun phrases toggle for ProcessingIndicator |
+| `hooks/useRemoteImage.ts` | Image loading via relay connection |
+| `hooks/useModelSettings.ts` | Model/thinking/voice preferences |
+| `hooks/useExpandedDiff.ts` | Expanded diff context fetching |
+| `hooks/useSchemaValidation.ts` | Schema validation settings |
+
+**Libs:**
+
+| File | Purpose |
+|------|---------|
+| `lib/preprocessMessages.ts` | `Message[]` → `RenderItem[]` conversion |
+| `lib/mergeMessages.ts` | Message merging/deduplication with DAG ordering |
+| `lib/pendingTasks.ts` | Finds pending Task tool_use blocks |
+| `lib/sessionFile.ts` | Extracts session ID from file change events |
+| `lib/validateToolResult.ts` | Validates tool results against Zod schemas |
+| `lib/classifyToolError.ts` | Error classification (user_rejection, command_failure, etc.) |
+| `lib/parseUserPrompt.ts` | Parses user prompts, extracts IDE metadata |
+| `types/renderItems.ts` | `RenderItem` union type and all item interfaces |
+| `constants.ts` | `ENTER_SENDS_MESSAGE` constant |
+
+**Shared package (copy wholesale):**
+
+| File | Purpose |
+|------|---------|
+| `shared/src/dag.ts` | `orderByParentChain()` for parentUuid-linked messages |
+| `shared/src/ideMetadata.ts` | IDE metadata tag parsing |
+| `shared/src/session/SessionView.ts` | Session display title utilities |
+| `shared/src/session/UnifiedSession.ts` | Multi-provider session abstraction |
+| `shared/src/session/index.ts` | Barrel exports |
+| `shared/src/claude-sdk-schema/types.ts` | SDK message & content block type definitions |
+
+**Styles:**
+
+| File | Purpose |
+|------|---------|
+| `styles/index.css` | Main styles (imports renderers.css and tool-rows.css) |
+| `styles/renderers.css` | Content block styles |
+| `styles/tool-rows.css` | Tool-specific styles |
+
+### 11.2 Extract What You Need — App Infrastructure
+
+These files are general YA app infrastructure. **Don't copy them whole** — extract the specific functions, types, and endpoints the session chat needs and integrate them into your own app's equivalent.
+
+#### `api/client.ts` — API Client
+
+The YA API client has ~90 endpoints. The session chat only needs these:
+
+**Session CRUD:**
+- `getSession(projectId, sessionId, beforeMessageId?, options?)` — Load session + messages
+- `getSessionMetadata(projectId, sessionId)` — Metadata-only refresh
+- `startSession(projectId, message, options?)` — Create new session
+- `resumeSession(projectId, sessionId, message, options?)` — Send message to existing session
+- `cloneSession(projectId, sessionId)` — Clone a session
+
+**Session interaction:**
+- `respondToInput(sessionId, requestId, response, answers?, feedback?)` — Tool approval / question answer
+- `setPermissionMode(projectId, sessionId, mode, modeVersion)` — Change permission mode
+- `setHold(projectId, sessionId, hold)` — Pause/resume agent
+- `abortProcess(projectId, sessionId, processId)` — Stop the agent
+- `cancelDeferredMessage(projectId, sessionId, queueId)` — Cancel queued message
+
+**Session list:**
+- `getSessions(params?)` — Global session list with filters
+- `getSessionStats()` — Counts by status, provider
+- `getRecentSessions()` — Recently visited
+- `markSessionSeen(projectId, sessionId)` — Mark as read
+- `updateSessionMetadata(projectId, sessionId, metadata)` — Rename, star, archive
+
+**Subagent content:**
+- `getAgentSession(projectId, sessionId, agentId)` — Load subagent messages
+- `getAgentMappings(projectId, sessionId)` — toolUseId → agentId mappings
+
+**Support:**
+- `expandDiffContext(projectId, sessionId, params)` — Expand diff hunks
+- `getProject(projectId)` — Returns `{ project: Project }` (for projectPath)
+- `getVersion()` — Server version
+
+**Types to extract:** `PaginationInfo`, `GlobalSessionItem`, `GlobalSessionStats`, `ProjectOption`, `SessionOptions`
+
+**Infrastructure:** The `fetchJSON()` helper routes through the global `Connection` in remote mode or uses native `fetch` for local. You'll need equivalent routing logic.
+
+#### `api/upload.ts` — File Upload
+
+Chunked upload over WebSocket. Extract `uploadFile()` if you support file attachments in messages.
+
+#### `types.ts` — Client Types
+
+Extract these types (the rest are app-level):
+- `Message`, `Session`, `SessionSummary`, `SessionStatus`, `Project`
+- `InputRequest`, `PermissionMode`, `ContentBlock`
+- Re-exported shared types: `ProviderName`, `ContextUsage`, `AgentActivity`, `PendingInputType`
+
+#### `shared/src/types.ts` — Shared Types
+
+Extract these (the rest are server/file-viewer infrastructure):
+- `ProviderName`, `ALL_PROVIDERS`, `ModelInfo`, `SlashCommand`, `ProviderInfo`
+- `PermissionMode`, `ModelOption`, `ThinkingOption`, `EffortLevel`
+- `SessionOwnership`, `EditAugment`, `PatchHunk`, `MarkdownAugment`
+- `thinkingOptionToConfig()`, `resolveModel()`, `getModelContextWindow()`
+
+#### `shared/src/app-types.ts` — App Content Types
+
+Extract these (skip server-side types like `SessionStartOptions`, `ServerStatus`):
+- `AppContentBlock` and constituent types
+- `AppMessage`, `AppAssistantMessage`, `AppUserMessage`
+- `AppSessionSummary`
+- `ContextUsage`, `AgentActivity`, `PendingInputType`
+- Type guards: `isToolUseBlock`, `isToolResultBlock`, `isTextBlock`, `isThinkingBlock`
+
+#### `shared/src/projectId.ts` — Project ID Encoding
+
+Extract `UrlProjectId`, `toUrlProjectId()`, `fromUrlProjectId()` — used in all API calls.
+
+#### `shared/src/relay.ts` + `shared/src/binary-framing.ts` — Relay Protocol
+
+Only needed if supporting remote/relay connections. Skip for direct-only integrations.
+
+#### `lib/connection/` — Connection Layer
+
+The connection layer manages WebSocket transport, reconnection, and relay multiplexing. Your app likely has its own transport. What the session chat needs:
+
+- **`Connection` interface** (from `types.ts`): `fetch()`, `subscribe()`, `upload()`, `close()`
+- **`getGlobalConnection()`** / **`setGlobalConnection()`**: Global singleton — hooks use this to route requests
+- **`connectionManager`**: Reconnection state machine with backoff
+- **`isRemoteClient()`**: Determines direct vs relay mode
+
+Implement the `Connection` interface with your own transport, or copy `DirectConnection.ts` / `WebSocketConnection.ts` for local connections.
+
+#### `lib/activityBus.ts` — SSE Event Hub
+
+Singleton connecting to `/api/activity/events` for file change notifications. Used by `useFileActivity` and `useSessionWatchStream`. Extract the event types and SSE subscription pattern, or replace with your own real-time event system.
+
+#### `lib/deviceDetection.ts` — Device Detection
+
+Extract `hasCoarsePointer()` (Enter vs Shift+Enter behavior in MessageInput) and `isMobileDevice()` (layout decisions). Most apps have their own device detection.
+
+#### `lib/storageKeys.ts` — localStorage Keys
+
+Extract the `UI_KEYS` object and `getServerScopedKey()`. Skip the migration logic.
+
+#### `lib/uuid.ts` — UUID Generation
+
+Extract `generateUUID()`, or use your own UUID utility. Trivial to replace.
+
+#### `providers/registry.ts` — Provider Registry
+
+Extract `getProvider()` (used for DAG ordering support check) and `getModelContextWindow()` (used for context usage calculation). The full registry covers all YA providers — you only need entries for the providers you support.
+
+#### UI Primitives You Probably Already Have
+
+These files provide generic UI infrastructure. **Use your own app's equivalents instead:**
+
+| YA File | What session chat needs from it | Your replacement |
+|---------|-------------------------------|------------------|
+| `contexts/ToastContext.tsx` | `useToastContext()` for SchemaValidation error toasts | Your toast system |
+| `components/Toast.tsx` | Toast container rendering | Your toast component |
+| `hooks/useToast.ts` | Toast state management | Your toast hook |
+| `components/ui/Modal.tsx` | Modal for file viewer, schema warnings | Your modal component |
+| `components/ConnectionBar.tsx` | Connection status bar | Your status indicator |
+| `hooks/useActivityBusState.ts` | Transport connection state | Your connection state |
+| `hooks/useDeveloperMode.ts` | `holdEnabled` flag, `connectionBarsEnabled` | Your settings system |
+| `components/SessionListItem.tsx` | Session card rendering (uses React Router `Link`) | Your list item with your router |
+| `components/RecentSessionsDropdown.tsx` | Session switcher (uses React Router) | Your dropdown with your router |
+| `components/VoiceInputButton.tsx` | Speech-to-text (uses Web Speech API) | Optional — omit if not needed |
+| `components/FilePathLink.tsx` | Clickable file paths | Optional — omit if not needed |
+| `hooks/useGlobalSessions.ts` | Session list data with SSE updates | Your data fetching pattern |
+| `hooks/useRecentSessions.ts` | Recent sessions list | Simple API wrapper — rewrite |
+
+### 11.3 Reference Files
+
+These are NOT needed for the integration but are useful as working examples:
+
+| File | Why it's useful |
+|------|----------------|
+| `pages/SessionPage.tsx` | Complete reference for how all hooks and providers wire together |
+| `pages/GlobalSessionsPage.tsx` | Reference for session list with filtering, bulk actions |
 
 ---
 
