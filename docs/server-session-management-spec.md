@@ -207,7 +207,7 @@ Codex stores sessions in a date hierarchy. The scanner reads the first line of e
 1. Recursively find all `.jsonl` files under `~/.codex/sessions/`
 2. Batch-read first lines (50 files per batch) to extract `cwd`
 3. Group sessions by `cwd` → each unique `cwd` becomes a project
-4. Session ID extracted from filename: UUID portion of `rollout-{model}-{uuid}.jsonl`
+4. Session ID: canonical source is `session_meta.payload.id` from the first line; filename UUID parsing (`rollout-{model}-{uuid}.jsonl`) is a fallback heuristic used by the external session tracker for fast path detection
 
 ### 2.6 Gemini Session Scanning
 
@@ -366,6 +366,8 @@ codex app-server --listen stdio://
 | `bypassPermissions` | `never` | `danger-full-access` |
 
 **Session ID:** Returned immediately from `thread/start` response as `thread.id`.
+
+**Mid-turn steering:** Codex supports a `turn/steer` JSON-RPC method that injects user input while a turn is in progress. If `turn/steer` fails (unsupported by older Codex versions), the message falls back to the deferred queue and is sent as the next turn's input. Denial feedback (when a user denies a tool approval) is also injected as follow-up user text in the same turn.
 
 ### 3.4 Gemini Provider
 
@@ -586,14 +588,17 @@ When an SDK needs permission to use a tool:
    │  Process transitions back to "in-turn"
 ```
 
-The `InputRequest` type:
+The `InputRequest` type (from `@yep-anywhere/shared`):
 ```typescript
 interface InputRequest {
   id: string;           // Unique request ID
-  type: "tool_approval" | "user_question";
-  toolName?: string;    // e.g., "Bash", "Edit", "Write"
-  input?: unknown;      // Tool input (command, file path, etc.)
-  message?: string;     // Human-readable prompt
+  sessionId: string;    // Associated session
+  type: "tool-approval" | "question" | "choice";
+  prompt: string;       // Human-readable prompt
+  options?: string[];   // For choice/question types
+  toolName?: string;    // e.g., "Bash", "Edit", "Write" (tool-approval only)
+  toolInput?: unknown;  // Tool input parameters (tool-approval only)
+  timestamp: string;    // ISO timestamp
 }
 ```
 
@@ -672,12 +677,12 @@ When the queue has waiters and an active process is idle, the Supervisor preempt
 3. Is process idle > DEFAULT_IDLE_PREEMPT_THRESHOLD_MS (10s)?
    │  ├── No → wait, check again later
    │  └── Yes → preempt:
-   │      a. process.hold()  →  state = { type: "hold", since: now }
-   │      b. Worker slot freed
+   │      a. process.abort()  →  terminates the process completely
+   │      b. unregisterProcess(process)  →  frees worker slot
    │      c. WorkerQueue.dequeue() → start queued session
 ```
 
-A held process can be resumed later if a worker slot opens up.
+**Important:** Preemption is a hard termination (abort + unregister), NOT a soft pause. The `hold` state is a separate mechanism used for explicit user-initiated pauses via `PUT /sessions/:id/hold`. A held process can be resumed; a preempted process is gone and must be re-created.
 
 ### 5.4 Queue Events
 
