@@ -4,6 +4,16 @@
 
 > **Key insight:** YA monitors ALL agent sessions on the system regardless of how they were started (VS Code, terminal, another supervisor) AND creates/manages its own. External sessions get read-only streaming via file watching; YA-started sessions get full interactive control.
 
+### Scope
+
+This specification covers exactly two things:
+
+1. **Agent lifecycle** — how agent sessions are discovered on disk, created via SDK/CLI, supervised through a state machine (in-turn → idle → waiting-input → hold → terminated), and cleaned up. This includes external session detection.
+
+2. **All bidirectional data between user and agent** — everything the user sends to the agent (text messages, images, file uploads, permission approvals, denial feedback, slash commands) and everything the agent sends back (streaming text, tool calls, tool results, thinking blocks, status changes, augmented content). This covers the complete pipeline from REST/WebSocket ingress through the provider abstraction to the SDK/CLI, and back out through stream augmentation to the WebSocket client.
+
+**Out of scope:** Authentication (SRP, password hashing, session tokens), relay transport encryption (NaCl, binary envelope framing), network binding configuration, browser tab tracking, session metadata management (starring, archiving, custom titles), notification timestamps, deployment, and any other server infrastructure that does not directly participate in the agent conversation lifecycle or data flow.
+
 ---
 
 ## Table of Contents
@@ -227,7 +237,7 @@ interface Project {
   activeOwnedCount: number;      // sessions owned by this server
   activeExternalCount: number;   // sessions controlled by external processes
   lastActivity: string | null;   // ISO timestamp
-  provider: ProviderName;        // "claude" | "codex" | "gemini" | etc.
+  provider: ProviderName;        // "claude" | "codex" | "codex-oss" | "gemini" | "gemini-acp" | "opencode"
 }
 ```
 
@@ -351,6 +361,7 @@ codex app-server --listen stdio://
 | YA Mode | Codex approvalPolicy | Codex sandbox |
 |---------|---------------------|---------------|
 | `default` | `on-request` | `workspace-write` |
+| `acceptEdits` | `on-request` | `workspace-write` |
 | `plan` | `on-request` | `read-only` |
 | `bypassPermissions` | `never` | `danger-full-access` |
 
@@ -442,7 +453,7 @@ type ProcessState =
 Client: POST /api/projects/:projectId/sessions { message, mode, model, ... }
   │
   ▼
-Supervisor.createSession(projectPath, message, mode, settings)
+Supervisor.startSession(projectPath, message, mode, settings)
   │
   ├── Check max workers limit
   │   ├── Under limit → proceed
@@ -450,7 +461,7 @@ Supervisor.createSession(projectPath, message, mode, settings)
   │
   ├── Get provider: getProvider(settings.providerName ?? "claude")
   │
-  ├── Create temp session ID: "temp-{uuid}"
+  ├── Create temp session ID: randomUUID()  // Plain UUID, no prefix
   │
   ├── Call provider.startSession({
   │     cwd: projectPath,
@@ -475,7 +486,7 @@ Supervisor.createSession(projectPath, message, mode, settings)
 Claude and Gemini don't return the real session ID at creation time. It arrives in the first SDK message:
 
 ```
-1. Supervisor creates with tempId = "temp-{uuid}"
+1. Supervisor creates with tempId = randomUUID()  // Plain UUID, no prefix
 2. Process.processMessages() starts consuming iterator
 3. First system/init message from SDK has session_id field
 4. Process updates internal _sessionId and emits:
@@ -493,9 +504,16 @@ Claude and Gemini don't return the real session ID at creation time. It arrives 
 This is the heart of the server — the event loop that consumes SDK output and distributes it:
 
 ```typescript
-async processMessages(iterator: AsyncIterableIterator<SDKMessage>): Promise<void> {
+// Private method on Process. Uses this.sdkIterator (set in constructor).
+private async processMessages(): Promise<void> {
   try {
     while (!this.iteratorDone) {
+      // Hold check: if held, wait until resumed before consuming next message
+      if (this._isHeld) {
+        await this.waitUntilResumed();
+        if (this.iteratorDone || this._state.type === "terminated") break;
+      }
+
       const result = await this.sdkIterator.next();
       if (result.done) { this.iteratorDone = true; this.transitionToIdle(); break; }
       const message = result.value;
@@ -517,8 +535,16 @@ async processMessages(iterator: AsyncIterableIterator<SDKMessage>): Promise<void
       this.emit({ type: "message", message });
 
       // 4. Detect state transitions: result message → idle
+      //    But first, feed next deferred message if any (queued while agent was busy)
       if (message.type === "result") {
-        this.transitionToIdle();
+        const next = this.deferredQueue.shift();
+        if (next) {
+          this.queue.push(next);          // Feed to SDK
+          this.transitionToState("in-turn");
+          this.emit({ type: "deferred-queue", messages: [...this.deferredQueue] });
+        } else {
+          this.transitionToIdle();
+        }
       }
 
       // 5. Update last SDK message timestamp (for stale detection)
@@ -529,6 +555,8 @@ async processMessages(iterator: AsyncIterableIterator<SDKMessage>): Promise<void
   }
 }
 ```
+
+**Deferred queue:** When a user sends a message while the agent is mid-turn (state = `in-turn`), the message is placed in a `deferredQueue` rather than fed to the SDK immediately. This prevents the Claude SDK from receiving out-of-order input, which can cause crashes. When the current turn completes (step 4 above), the next deferred message is automatically fed. A `deferred-queue` event is emitted to clients so they know the message was received but is waiting.
 
 ### 4.5 Tool Approval Flow
 
@@ -686,7 +714,8 @@ Process.processMessages() loop
     │ 2. Detect state transitions
     │ 3. Store in dual-bucket buffer (skip stream_events)
     │ 4. Accumulate streaming text
-    │ 5. Emit to process.listeners
+    │ 5. On turn complete: feed next deferred message or transition to idle
+    │ 6. Emit to process.listeners
     ▼
 Subscription handler (createSessionSubscription)
     │ 1. Pass message to StreamAugmenter.processMessage()
@@ -755,7 +784,7 @@ class MessageQueue {
 | `connected` | `{ processId, sessionId, state, permissionMode, model }` | On subscription start |
 | `message` | SDKMessage (augmented) | Each message from SDK |
 | `status` | `{ state: AgentActivity, request?: InputRequest }` | State transitions |
-| `mode-change` | `{ mode: PermissionMode, version: number }` | Permission mode changed |
+| `mode-change` | `{ permissionMode: PermissionMode, modeVersion: number }` | Permission mode changed |
 | `session-id-changed` | `{ oldSessionId, newSessionId }` | Temp ID resolved |
 | `markdown-augment` | `{ messageId, blockIndex, html, type }` | Completed markdown block |
 | `pending` | `{ messageId, html }` | Partial markdown (streaming) |
@@ -777,9 +806,10 @@ function createSessionSubscription(process, emit, options?): { cleanup } {
   emit("connected", { processId, sessionId, state, ... });
 
   // 3. Replay message history (dual-bucket contents)
+  //    NOTE: Replay emits raw messages with markSubagent() — NOT augmented.
+  //    They were augmented when first streamed; replaying raw avoids double-rendering.
   for (const msg of process.getMessageHistory()) {
-    await augmenter.processMessage(msg);
-    emit("message", msg);
+    emit("message", markSubagent(msg));
   }
 
   // 4. Catch up streaming text (if mid-stream)
@@ -860,6 +890,10 @@ await augmenter.flush();  // Finalize last blocks
 ```
 
 **Lazy initialization:** The augmenter is created lazily on first message event. If a client connects to an idle process, no augmenter overhead is incurred.
+
+### 7.5 Subagent Marking
+
+When the Claude SDK spawns subagents (Tasks), each subagent runs as a separate session. The subscription handler applies `markSubagent()` to every message before emitting it. This function scans for `parent_tool_use_id` fields to identify messages originating from subagent sessions, allowing the client to render them as collapsed "Task" blocks rather than inline assistant text. The mapping is built by `ClaudeSessionReader.getAgentMappings()` which scans the session JSONL for task-spawning patterns.
 
 **Key source files:**
 - `packages/server/src/augments/stream-augmenter.ts`
@@ -1396,12 +1430,12 @@ type BusEvent =
   | QueueRequestRemovedEvent   // Request started or cancelled
   | WorkerActivityEvent        // Worker pool status (activeWorkers, queueLength)
 
-  // Infrastructure
-  | SourceChangeEvent          // Source code changed (dev mode reload)
-  | BackendReloadedEvent       // Server restarted
-  | NetworkBindingChangedEvent // Network config changed
+  // Infrastructure (not part of agent lifecycle — included for EventBus completeness)
+  | SourceChangeEvent          // Source code changed (dev mode hot reload)
+  | BackendReloadedEvent       // Server process restarted
+  | NetworkBindingChangedEvent // Network config changed (e.g., Tailscale IP)
   | BrowserTabConnectedEvent   // Client connected to activity stream
-  | BrowserTabDisconnectedEvent; // Client disconnected
+  | BrowserTabDisconnectedEvent; // Client disconnected from activity stream
 ```
 
 ### 12.3 FileWatcher
@@ -1518,6 +1552,12 @@ This powers the dashboard's real-time session list — new sessions appearing, s
 | GET | `/api/sessions/:sessionId/pending-input` | Get current tool approval request |
 | GET | `/api/sessions/:sessionId/process` | Get process info (state, model, etc.) |
 | POST | `/api/sessions/:sessionId/mark-seen` | Mark session as read |
+| POST | `/api/sessions/:sessionId/interrupt` | Graceful turn interrupt (stop current turn without killing process) |
+| PUT | `/api/sessions/:sessionId/thinking` | Change thinking mode mid-session |
+| PUT | `/api/sessions/:sessionId/model` | Change model mid-session |
+| GET | `/api/sessions/:sessionId/models` | Get available models for running session |
+| GET | `/api/sessions/:sessionId/commands` | Get available slash commands |
+| POST | `/api/projects/:projectId/sessions/:sessionId/clone` | Clone/fork a session |
 | DELETE | `/api/sessions/:sessionId` | Abort session |
 | DELETE | `/api/sessions/:sessionId/deferred/:tempId` | Cancel deferred message |
 
@@ -1628,7 +1668,7 @@ All WebSocket messages are JSON objects with a `type` field:
 { type: "connected", data: { processId, sessionId, state, permissionMode, model } }
 { type: "message", data: SDKMessage }
 { type: "status", data: { state: AgentActivity, request?: InputRequest } }
-{ type: "mode-change", data: { mode: PermissionMode, version: number } }
+{ type: "mode-change", data: { permissionMode: PermissionMode, modeVersion: number } }
 { type: "session-id-changed", data: { oldSessionId, newSessionId } }
 { type: "markdown-augment", data: { messageId, blockIndex, html, type } }
 { type: "pending", data: { messageId, html } }
@@ -1648,7 +1688,8 @@ All WebSocket messages are JSON objects with a `type` field:
 // ... all BusEvent types
 
 // Session-watch channel
-{ type: "session-watch-change", data: { sessionId, changeType } }
+{ type: "session-watch-change", data: { sessionId, projectId, provider, path, source, timestamp } }
+// source: "fs-watch" | "poll"
 ```
 
 **Client → Server:**
@@ -1659,22 +1700,50 @@ All WebSocket messages are JSON objects with a `type` field:
 { type: "unsubscribe", subscriptionId }
 ```
 
-### 13.8 Relay Connection (SRP + Encryption)
+### 13.8 File Upload Protocol
 
-When connecting through a relay server, messages are encrypted:
+File uploads use a dedicated WebSocket endpoint, not the main message WebSocket:
 
-1. **SRP handshake:** Client proves password knowledge without revealing it to the relay
-2. **Session key derivation:** 32-byte key from SRP exchange
-3. **Message encryption:** NaCl XSalsa20-Poly1305 (authenticated encryption)
-4. **Binary envelopes:** Compressed, encrypted, framed binary protocol
-5. **Sequence numbers:** Each encrypted message includes a monotonic sequence number for replay prevention
+**Endpoint:** `WS /api/projects/:projectId/sessions/:sessionId/upload/ws`
 
-The relay server sees only opaque ciphertext. All application messages (subscribe, message, status, etc.) are wrapped in encrypted envelopes.
+**Protocol:**
+```typescript
+// Client → Server (JSON)
+{ type: "start", filename: string, size: number, mimeType: string }
+// Client → Server (binary frames): raw file chunks
+{ type: "end" }       // Finalize upload
+{ type: "cancel" }    // Abort upload
 
-**Key source files:**
-- `packages/server/src/routes/sessions.ts`
-- `packages/server/src/routes/ws-relay-handlers.ts`
-- `packages/server/src/subscriptions.ts`
+// Server → Client (JSON)
+{ type: "progress", bytesReceived: number, totalBytes: number }
+{ type: "complete", file: UploadedFile }
+{ type: "error", message: string }
+```
+
+**Storage:** Files are saved to `{dataDir}/uploads/{projectId}/{sessionId}/{uuid}-{filename}`.
+
+**Integration with messages:** The resulting `UploadedFile` objects are attached to `UserMessage.attachments[]`. When `MessageQueue.toSDKMessage()` formats the message for the SDK, it appends uploaded file paths to the text content so the agent can access them via the Read tool:
+
+```
+User uploaded files:
+- report.pdf (2.3 MB, application/pdf): /path/to/uploads/report.pdf
+```
+
+**Key source file:** `packages/server/src/routes/upload.ts`
+
+### 13.9 Focused Session Watch (FocusedSessionWatchManager)
+
+The `session-watch` WebSocket channel is backed by a separate watching mechanism from the directory-level `FileWatcher`. While `FileWatcher` watches entire provider directories recursively, `FocusedSessionWatchManager` watches **individual session files** with higher precision:
+
+- **Per-file `fs.watch`** with polling fallback for reliability
+- **Resolve-retry mechanism** for sessions whose files don't exist yet (e.g., temp session ID not yet resolved to a real file)
+- **Reference-counted subscriptions** — watchers are shared across WebSocket clients watching the same session; cleaned up when the last subscriber disconnects
+- **Cross-provider file resolution** — resolves session ID to the correct file path across Claude (.jsonl), Codex (.jsonl in date hierarchy), and Gemini (.json)
+- **Debounced change detection** to prevent duplicate events
+
+This is used for read-only viewing of external sessions where the client needs to know when the session file changes to reload history.
+
+**Key source file:** `packages/server/src/watcher/FocusedSessionWatchManager.ts`
 
 ---
 
@@ -1693,4 +1762,5 @@ To replicate YA's session management:
 9. **Buffer** for late-joining clients (Section 8) — dual-bucket with 30-second window
 10. **Load history** from heterogeneous file formats (Section 9) — DAG resolution for Claude, linear for Codex/Gemini
 11. **Paginate** long sessions (Section 10) — slice at compaction boundaries
-12. **Serve** via REST + WebSocket (Section 13) — three subscription channels for different client needs
+12. **Accept uploads** via chunked WebSocket protocol (Section 13.8) — files become agent-accessible paths
+13. **Serve** via REST + WebSocket (Section 13) — three subscription channels for different client needs
